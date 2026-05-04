@@ -1,0 +1,129 @@
+{{- /*
+
+{{- if not .Values.knative.enabled }}
+{{- if or .Values.ollama.models.pull .Values.ollama.models.run .Values.ollama.models.create }}
+{{- $hasConfigMaps := false -}}
+{{- range .Values.ollama.models.create -}}
+  {{- if .configMapRef }}{{ $hasConfigMaps = true }}{{ end -}}
+{{- end -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "ollama.fullname" . }}-model-loader
+  namespace: {{ include "ollama.namespace" . }}
+  labels:
+    {{- include "ollama.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  ttlSecondsAfterFinished: {{ .Values.ollama.models.loader_job.ttl_seconds }}
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: model-loader
+          image: "{{ .Values.ollama.models.loader_job.image }}:{{ .Values.ollama.models.loader_job.tag }}"
+          env:
+            - name: OLLAMA_SERVICE_URL
+              value: "http://{{ include "ollama.fullname" . }}:{{ .Values.service.port }}"
+          command:
+            - /bin/sh
+            - -c
+            - |-
+              echo "Waiting for Ollama API at $OLLAMA_SERVICE_URL..."
+              until curl -sS "$OLLAMA_SERVICE_URL/api/tags" > /dev/null; do
+                sleep 5
+              done
+
+              {{- $allModels := list -}}
+
+              {{- if .Values.ollama.models.pull }}
+              {{- range .Values.ollama.models.pull }}
+
+              {{- if contains ":" . }}
+                {{- $allModels = append $allModels . }}
+              {{- else }}
+                {{- $allModels = append $allModels (printf "%s:latest" .) }}
+              {{- end }}
+
+              echo "Pulling model: {{ . }}"
+              curl -sS -X POST "$OLLAMA_SERVICE_URL/api/pull" -d '{
+                "name": "{{ . }}",
+                "insecure": {{ $.Values.ollama.insecure | toString }},
+                "stream": false
+              }'; echo
+              {{- end }}
+              {{- end }}
+
+              {{- if .Values.ollama.models.create }}
+              {{- range .Values.ollama.models.create }}
+              {{- $allModels = append $allModels .name }}
+              echo "Creating model: {{ .name }}"
+              {{- if .template }}
+              curl -sS -X POST "$OLLAMA_SERVICE_URL/api/create" -d '{
+                "model": "{{ .name }}",
+                "modelfile": {{ .template | quote }}
+              }'; echo
+              {{- end }}
+              {{- if .configMapRef }}
+              model=$(jq -Rs /models/{{ .name }})
+              curl -sS -X POST "$OLLAMA_SERVICE_URL/api/create" -d '{
+                "model": "{{ .name }}",
+                "modelfile": "$model"
+              }'; echo
+              {{- end }}
+              {{- end }}
+              {{- end }}
+
+              {{- if .Values.ollama.models.run }}
+              {{- range .Values.ollama.models.run }}
+              {{- $modelName := contains ":" . | ternary . (printf "%s:latest" .) }}
+              {{- $allModels = append $allModels $modelName }}
+              echo "Loading model into memory: {{ $modelName }}"
+              curl -sS -X POST "$OLLAMA_SERVICE_URL/api/generate" -d '{
+                "model": "{{ $modelName }}",
+                "keep_alive": -1,
+                "prompt": "Hello",
+                "stream": false
+              }'; echo
+              {{- end }}
+              {{- end }}
+
+              {{- if .Values.ollama.models.clean }}
+              echo "Cleaning unused models..."
+              INSTALLED_MODELS=$(curl -sS "$OLLAMA_SERVICE_URL/api/tags" | jq -r '.models[].name')
+              for model in $INSTALLED_MODELS; do
+                echo "{{ $allModels | join " " }}" | grep -q "$model" || \
+                (echo "Deleting $model" && curl -sS -X DELETE "$OLLAMA_SERVICE_URL/api/delete" -d "{\"name\": \"$model\"}" && echo)
+              done
+              {{- end }}
+              
+              echo "Model management task complete."
+              sleep inf
+          {{- if $hasConfigMaps }}
+          volumeMounts:
+            {{- range .Values.ollama.models.create }}
+            {{- if .configMapRef }}
+            - name: {{ .name }}-config-model-volume
+              mountPath: /models
+            {{- end }}
+            {{- end }}
+          {{- end }}
+      {{- if $hasConfigMaps }}
+      volumes:
+        {{- range .Values.ollama.models.create }}
+        {{- if .configMapRef }}
+        - name: {{ .name }}-config-model-volume
+          configMap:
+            name: {{ .configMapRef }}
+            items:
+              - key: {{ .configMapKeyRef }}
+                path: {{ .name }}
+        {{- end }}
+        {{- end }}
+      {{- end }}
+{{- end }}
+{{- end }}
+
+*/}}
